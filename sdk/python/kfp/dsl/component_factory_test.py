@@ -744,5 +744,69 @@ class TestEmbeddedArtifactSymlinkResolution(unittest.TestCase):
                     pass
 
 
+class TestEmbeddedArtifactDeterministicArchive(unittest.TestCase):
+    """The embedded archive must not depend on file metadata."""
+
+    def _build_component(self, root, mtime, uid, gid):
+        import os
+        import tarfile
+        from unittest import mock
+
+        os.utime(os.path.join(root, 'a.txt'), (mtime, mtime))
+        os.utime(root, (mtime, mtime))
+
+        real_add = tarfile.TarFile.add
+
+        # Simulate a different owner/group; os.chown needs privileges.
+        def add_with_owner(tar, name, *args, filter=None, **kwargs):
+
+            def owner_filter(tarinfo):
+                tarinfo.uid, tarinfo.gid = uid, gid
+                tarinfo.uname, tarinfo.gname = f'u{uid}', f'g{gid}'
+                return filter(tarinfo) if filter else tarinfo
+
+            return real_add(tar, name, *args, filter=owner_filter, **kwargs)
+
+        with mock.patch.object(tarfile.TarFile, 'add', add_with_owner):
+
+            @component(
+                base_image='python:3.11',
+                embedded_artifact_path=root,
+                install_kfp_package=False,
+            )
+            def my_comp(cfg: dsl.EmbeddedInput[dsl.Dataset]):
+                pass
+
+        return my_comp
+
+    def test_archive_independent_of_mtime_and_ownership(self):
+        import io
+        import os
+        import tarfile
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'a.txt')
+            with open(path, 'w') as f:
+                f.write('content')
+            os.chmod(path, 0o755)
+
+            first = self._build_component(root, 1_000_000_000, 1000, 1000)
+            second = self._build_component(root, 1_700_000_000, 0, 50)
+
+            # The generated source embeds the gzip header, including its
+            # mtime, so equality covers both the tar and gzip layers.
+            self.assertEqual(
+                first.component_spec.implementation.container.command[-1],
+                second.component_spec.implementation.container.command[-1],
+            )
+
+            raw = _get_archive(first)
+            with tarfile.open(fileobj=io.BytesIO(raw), mode='r') as tar:
+                member = tar.getmember('a.txt')
+                self.assertEqual(member.mode & 0o777, 0o755)
+                self.assertEqual(member.mtime, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

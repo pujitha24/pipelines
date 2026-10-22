@@ -530,6 +530,17 @@ CONTAINERIZED_PYTHON_COMPONENT_COMMAND = [
 ]
 
 
+def _normalize_tarinfo(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Strips non-deterministic metadata so identical content yields an
+    identical archive. File permissions are preserved."""
+    tarinfo.mtime = 0
+    tarinfo.uid = 0
+    tarinfo.gid = 0
+    tarinfo.uname = ''
+    tarinfo.gname = ''
+    return tarinfo
+
+
 def _safe_add_to_tar(
     tar: tarfile.TarFile,
     root: pathlib.Path,
@@ -552,7 +563,9 @@ def _safe_add_to_tar(
     resolved_root = root.resolve()
 
     if resolved_root.is_file():
-        tar.add(str(resolved_root), arcname=arcname)
+        tar.add(
+            str(resolved_root), arcname=arcname, filter=_normalize_tarinfo
+        )
         return
 
     if not resolved_root.is_dir():
@@ -582,7 +595,12 @@ def _safe_add_to_tar(
                     f'Directory symlinks are not supported: {current}'
                 )
 
-            tar.add(str(resolved), arcname=arc_prefix, recursive=False)
+            tar.add(
+                str(resolved),
+                arcname=arc_prefix,
+                recursive=False,
+                filter=_normalize_tarinfo,
+            )
             for child in sorted(resolved.iterdir()):
                 child_arc = (
                     f'{arc_prefix}/{child.name}'
@@ -597,7 +615,9 @@ def _safe_add_to_tar(
                 raise ValueError(
                     f'Path escapes artifact tree: {current} -> {resolved}'
                 )
-            tar.add(str(resolved), arcname=arc_prefix)
+            tar.add(
+                str(resolved), arcname=arc_prefix, filter=_normalize_tarinfo
+            )
         else:
             raise ValueError(f'Unsupported file type: {current}')
 
@@ -648,7 +668,7 @@ def _get_command_and_args_for_lightweight_component(
 
         archive_bytes = buf.getvalue()
 
-        compressed_bytes = gzip.compress(archive_bytes)
+        compressed_bytes = gzip.compress(archive_bytes, mtime=0)
         compressed_size_mb = len(compressed_bytes) / (1024 * 1024)
         if compressed_size_mb > 1:
             warnings.warn(
